@@ -2,7 +2,8 @@ all: build
 
 VERSION=`git tag |tail -n1`
 build:
-	@go build -ldflags "-s -w -X $(shell go list)/internal.Version=${VERSION}" ./cmd/gorss/...
+	@go build -ldflags "-s -w -X $(shell go list)/internal.Version=${VERSION}" -o ./release/gorss.amd64 ./cmd/gorss/...
+	@CGO_ENABLED=1 GOARCH=arm64 GOOS=linux go build -ldflags "-s -w -X $(shell go list)/internal.Version=${VERSION}" -o ./release/gorss.arm64 ./cmd/gorss/...
 
 run: build
 	@./gorss
