@@ -12,7 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gdamore/tcell"
+	"github.com/gdamore/tcell/v2"
+	"github.com/gen2brain/beeep"
 	"github.com/rivo/tview"
 )
 
@@ -90,8 +91,10 @@ func (c *Controller) GetConfigKeys() map[string]string {
 	keys["Select Article Window"] = c.conf.KeySelectArticleWindow
 	keys["Select Preview Window"] = c.conf.KeySelectPreviewWindow
 	keys["Update Feeds"] = c.conf.KeyUpdateFeeds
+	keys["Undo Last Read"] = c.conf.KeyUndoLastRead
 	keys["Switch Windows"] = c.conf.KeySwitchWindows
 	keys["Quit"] = c.conf.KeyQuit
+	keys["Search"] = c.conf.KeySearchPromt
 
 	for _, cmd := range c.conf.CustomCommands {
 		keys[cmd.Cmd] = cmd.Key
@@ -139,6 +142,7 @@ func (c *Controller) Quit() {
 // UpdateFeeds updates the articles kept in the controller
 func (c *Controller) UpdateFeeds() {
 	c.rss.Update()
+	news := make(map[string]int)
 	for _, f := range c.rss.feeds {
 		if f.feed == nil {
 			continue
@@ -181,16 +185,42 @@ func (c *Controller) UpdateFeeds() {
 			// Make sure the same article doesn't exists.
 			exists := false
 			for _, e := range c.articles {
-				if e.title == a.title {
+				if strings.EqualFold(e.title, a.title) {
 					exists = true
 				}
 			}
 
 			if !exists {
+				if f.displayName != "" {
+					news[f.displayName]++
+				} else {
+					news[f.feed.Title]++
+				}
 				c.db.Save(a)
 			}
 		}
 	}
+
+	if c.conf.Notifications {
+		// skip error handling, best effort to show notifications.
+		newArticles := ""
+		total := 0
+		for k, v := range news {
+			if v > 0 {
+				newArticles += fmt.Sprintf("[%d] %s\n", v, k)
+				total += v
+			}
+		}
+
+		if total > 0 {
+			articles := "Articles"
+			if total == 1 {
+				articles = "Article"
+			}
+			beeep.Notify(fmt.Sprintf("%s GORSS: %d New %s", c.theme.PreviewIcon, total, articles), newArticles, "")
+		}
+	}
+
 	c.lastUpdate = time.Now()
 	c.GetArticlesFromDB()
 	c.isUpdated = true
@@ -220,9 +250,8 @@ func (c *Controller) OpenLink(link string) {
 	browser := c.conf.WebBrowser
 	if browser != "" {
 		if err = exec.Command(browser, link).Start(); err != nil {
-			log.Println("unable to open %s on %s: %v", link, browser, err)
+			log.Printf("unable to open %s on %s: %v\n", link, browser, err)
 		}
-
 		return
 	}
 
@@ -375,10 +404,10 @@ func (c *Controller) GetArticleForSelection() *Article {
 	var cell *tview.TableCell
 
 	if c.activeFeed == "unread" {
-		cell = c.win.articles.GetCell(1, 3)
+		cell = c.win.articles.GetCell(1, 2)
 	} else {
 		r, _ := c.win.articles.GetSelection()
-		cell = c.win.articles.GetCell(r, 3)
+		cell = c.win.articles.GetCell(r, 2)
 	}
 	ref := cell.GetReference()
 	if ref != nil {
@@ -433,11 +462,6 @@ func (c *Controller) SelectArticle(row, col int) {
 
 	c.ShowArticles(c.activeFeed)
 	c.ShowFeeds()
-
-	if c.prevArticle != nil {
-		c.db.MarkRead(c.prevArticle)
-		c.prevArticle.read = true
-	}
 }
 
 // Input handles keystrokes
@@ -477,12 +501,12 @@ func (c *Controller) Input(e *tcell.EventKey) *tcell.EventKey {
 			c.linksToOpen = append(c.linksToOpen, a.link)
 			// Append the linkmarker icon
 			r, _ := c.win.articles.GetSelection()
-			cell := c.win.articles.GetCell(r, 1)
+			cell := c.win.articles.GetCell(r, 0)
 			cell.SetText(fmt.Sprintf("%s%s", c.theme.LinkMarker, c.theme.UnreadMarker))
 		} else {
 			// Remove the linkmarker icon
 			r, _ := c.win.articles.GetSelection()
-			cell := c.win.articles.GetCell(r, 1)
+			cell := c.win.articles.GetCell(r, 0)
 			cell.SetText(c.theme.UnreadMarker)
 		}
 		if c.activeFeed != "unread" {
@@ -563,13 +587,25 @@ func (c *Controller) Input(e *tcell.EventKey) *tcell.EventKey {
 		c.ShowArticles(c.activeFeed)
 
 	case c.conf.KeyMarkAllRead:
-		c.db.MarkAllRead()
+		c.db.MarkAllRead("")
+		c.GetArticlesFromDB()
+		c.ShowArticles(c.activeFeed)
+		c.ShowFeeds()
+
+	case c.conf.KeyMarkAllReadFeed:
+		c.db.MarkAllRead(c.activeFeed)
 		c.GetArticlesFromDB()
 		c.ShowArticles(c.activeFeed)
 		c.ShowFeeds()
 
 	case c.conf.KeyMarkAllUnread:
-		c.db.MarkAllUnread()
+		c.db.MarkAllUnread("")
+		c.GetArticlesFromDB()
+		c.ShowArticles(c.activeFeed)
+		c.ShowFeeds()
+
+	case c.conf.KeyMarkAllUnreadFeed:
+		c.db.MarkAllUnread(c.activeFeed)
 		c.GetArticlesFromDB()
 		c.ShowArticles(c.activeFeed)
 		c.ShowFeeds()
@@ -600,15 +636,26 @@ func (c *Controller) Input(e *tcell.EventKey) *tcell.EventKey {
 		c.win.ToggleHelp()
 
 	case c.conf.KeyUndoLastRead:
-		if c.undoArticle != nil {
-			c.undoArticle.read = false
+		if c.activeFeed == "unread" {
+			if c.undoArticle != nil {
+				c.undoArticle.read = false
+			}
+			if c.prevArticle != nil {
+				c.prevArticle.read = false
+			}
+			c.prevArticle = c.undoArticle
+			c.ShowArticles(c.activeFeed)
+
+			c.win.articles.Select(1, 2)
+		} else {
+			a := c.GetArticleForSelection()
+			if a != nil {
+				a.read = false
+			}
+
+			r, _ := c.win.articles.GetSelection()
+			c.win.articles.Select(r-1, 2)
 		}
-		if c.prevArticle != nil {
-			c.prevArticle.read = false
-		}
-		c.prevArticle = c.undoArticle
-		c.ShowArticles(c.activeFeed)
-		c.win.articles.Select(1, 3)
 
 	case "h":
 		break
